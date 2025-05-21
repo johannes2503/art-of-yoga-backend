@@ -1,60 +1,134 @@
-from rest_framework import viewsets, permissions, status
+from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from django.conf import settings
 from .models import UserProfile
-from .serializers import UserProfileSerializer
+from .serializers import (
+    UserRegistrationSerializer,
+    UserProfileSerializer,
+    UserProfileUpdateSerializer
+)
+from .authentication import SupabaseJWTAuthentication
+import requests
 
-class IsOwnerOrReadOnly(permissions.BasePermission):
-    """
-    Custom permission to only allow users to edit their own profile.
-    """
-    def has_object_permission(self, request, view, obj):
-        if request.method in permissions.SAFE_METHODS:
-            return True
-        return obj == request.user.userprofile
+class IsAdminUser(permissions.BasePermission):
+    """Custom permission to only allow admin users."""
+    def has_permission(self, request, view):
+        return request.user and request.user.role == 'admin'
 
-class UserProfileViewSet(viewsets.ModelViewSet):
+class IsInstructorOrAdmin(permissions.BasePermission):
+    """Custom permission to only allow instructors and admins."""
+    def has_permission(self, request, view):
+        return request.user and request.user.role in ['instructor', 'admin']
+
+class UserViewSet(viewsets.ModelViewSet):
+    """ViewSet for user registration and profile management."""
+    authentication_classes = [SupabaseJWTAuthentication]
     queryset = UserProfile.objects.all()
-    serializer_class = UserProfileSerializer
-    permission_classes = [permissions.IsAuthenticated, IsOwnerOrReadOnly]
     
-    def get_queryset(self):
-        user = self.request.user.userprofile
-        if user.is_instructor:
-            # Instructors can see their own profile and their clients' profiles
-            return UserProfile.objects.filter(
-                client_relationships__instructor=user
-            ).distinct() | UserProfile.objects.filter(id=user.id)
+    def get_permissions(self):
+        """Set permissions based on action."""
+        if self.action == 'create':
+            permission_classes = [permissions.AllowAny]
+        elif self.action in ['update', 'partial_update', 'destroy']:
+            permission_classes = [IsAdminUser]
         else:
-            # Clients can only see their own profile and their instructor's profile
-            return UserProfile.objects.filter(
-                id__in=[user.id, user.client_relationships.first().instructor.id if user.client_relationships.exists() else None]
-            ).exclude(id=None)
+            permission_classes = [permissions.IsAuthenticated]
+        return [permission() for permission in permission_classes]
+    
+    def get_serializer_class(self):
+        """Return appropriate serializer class."""
+        if self.action == 'create':
+            return UserRegistrationSerializer
+        elif self.action in ['update', 'partial_update']:
+            return UserProfileUpdateSerializer
+        return UserProfileSerializer
+    
+    def create(self, request, *args, **kwargs):
+        """Handle user registration."""
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        # Create user in Supabase
+        supabase_data = {
+            'email': serializer.validated_data['email'],
+            'password': serializer.validated_data['password'],
+            'user_metadata': {
+                'full_name': serializer.validated_data['full_name'],
+                'role': serializer.validated_data['role']
+            }
+        }
+        
+        try:
+            response = requests.post(
+                f"{settings.SUPABASE_URL}/auth/v1/signup",
+                json=supabase_data,
+                headers={'apikey': settings.SUPABASE_KEY}
+            )
+            response.raise_for_status()
+            supabase_user = response.json()
+            
+            # Create user profile in Django
+            user_profile = UserProfile.objects.create(
+                supabase_id=supabase_user['id'],
+                email=serializer.validated_data['email'],
+                full_name=serializer.validated_data['full_name'],
+                role=serializer.validated_data['role']
+            )
+            
+            return Response(
+                UserProfileSerializer(user_profile).data,
+                status=status.HTTP_201_CREATED
+            )
+            
+        except requests.exceptions.RequestException as e:
+            return Response(
+                {'error': f'Failed to create user in Supabase: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
     
     @action(detail=False, methods=['get'])
     def me(self, request):
-        """Get the current user's profile."""
-        serializer = self.get_serializer(request.user.userprofile)
+        """Get current user's profile."""
+        serializer = UserProfileSerializer(request.user)
         return Response(serializer.data)
     
-    @action(detail=True, methods=['post'])
-    def update_role(self, request, pk=None):
-        """Update a user's role (instructor only)."""
-        if not request.user.userprofile.is_instructor:
+    @action(detail=False, methods=['post'])
+    def change_password(self, request):
+        """Change user's password."""
+        if not request.user.is_authenticated:
             return Response(
-                {'error': 'Only instructors can update roles'},
-                status=status.HTTP_403_FORBIDDEN
+                {'error': 'Authentication required'},
+                status=status.HTTP_401_UNAUTHORIZED
             )
         
-        profile = self.get_object()
-        new_role = request.data.get('role')
+        old_password = request.data.get('old_password')
+        new_password = request.data.get('new_password')
         
-        if new_role not in ['client', 'instructor']:
+        if not old_password or not new_password:
             return Response(
-                {'error': 'Invalid role. Must be either "client" or "instructor"'},
+                {'error': 'Both old and new passwords are required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        profile.role = new_role
-        profile.save()
-        return Response(self.get_serializer(profile).data) 
+        try:
+            # Update password in Supabase
+            response = requests.post(
+                f"{settings.SUPABASE_URL}/auth/v1/user/password",
+                json={
+                    'old_password': old_password,
+                    'new_password': new_password
+                },
+                headers={
+                    'apikey': settings.SUPABASE_KEY,
+                    'Authorization': f"Bearer {request.auth}"
+                }
+            )
+            response.raise_for_status()
+            return Response({'message': 'Password updated successfully'})
+            
+        except requests.exceptions.RequestException as e:
+            return Response(
+                {'error': f'Failed to update password: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            ) 

@@ -137,9 +137,29 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:19006").split(",")
 
 # Supabase settings (placeholders)
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
+SUPABASE_KEY = os.environ.get('SUPABASE_KEY', '')
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+
+# Media Storage Settings
+MEDIA_STORAGE_BACKEND = 'core.storage.SupabaseStorage'
+MEDIA_ASSET_TYPES = {
+    'image': ['image/jpeg', 'image/png', 'image/gif', 'image/webp'],
+    'video': ['video/mp4', 'video/webm', 'video/quicktime'],
+    'audio': ['audio/mpeg', 'audio/wav', 'audio/ogg'],
+    'animation': ['application/json']  # For Lottie animations
+}
+
+# Maximum file sizes (in bytes)
+MAX_FILE_SIZES = {
+    'image': 5 * 1024 * 1024,  # 5MB
+    'video': 100 * 1024 * 1024,  # 100MB
+    'audio': 20 * 1024 * 1024,  # 20MB
+    'animation': 1 * 1024 * 1024  # 1MB
+}
+
+# Signed URL expiration time (in seconds)
+SIGNED_URL_EXPIRATION = 3600  # 1 hour
 
 # Django REST Framework settings
 REST_FRAMEWORK = {
